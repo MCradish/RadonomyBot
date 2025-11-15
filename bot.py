@@ -945,6 +945,198 @@ async def top_radcoin(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
+# ===================== НАСТРОЙКИ РУЛЕТКИ =========================
+
+@bot.tree.command(
+    name="roulette-settings",
+    description="Показать текущие настройки рулетки.",
+)
+async def roulette_settings(interaction: discord.Interaction):
+    cd = get_setting("roulette_cd_minutes")
+    min_bet = get_setting("roulette_min_bet")
+    max_bet = get_setting("roulette_max_bet")
+    rb = get_setting("roulette_payout_red_black")
+    g = get_setting("roulette_payout_green")
+
+    embed = discord.Embed(
+        title="🎰 Настройки рулетки",
+        color=0xF1C40F,
+    )
+    embed.add_field(name="КД", value=f"`{cd}` минут", inline=False)
+    embed.add_field(
+        name="Диапазон ставки",
+        value=f"от `{int(min_bet)}` до `{int(max_bet)}` Coins",
+        inline=False,
+    )
+    embed.add_field(
+        name="Множитель красное/чёрное",
+        value=f"`x{rb}`",
+        inline=True,
+    )
+    embed.add_field(
+        name="Множитель зелёное (0)",
+        value=f"`x{g}`",
+        inline=True,
+    )
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(
+    name="set-roulette",
+    description="Изменить настройки рулетки (только админы).",
+)
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    cd_minutes="КД в минутах (0 = без КД)",
+    min_bet="Минимальная ставка",
+    max_bet="Максимальная ставка",
+    payout_red_black="Множитель для красного/чёрного (напр. 2.0)",
+    payout_green="Множитель для зелёного (0) (напр. 14.0)",
+)
+async def set_roulette(
+    interaction: discord.Interaction,
+    cd_minutes: Optional[int] = None,
+    min_bet: Optional[int] = None,
+    max_bet: Optional[int] = None,
+    payout_red_black: Optional[float] = None,
+    payout_green: Optional[float] = None,
+):
+    changes = []
+
+    if cd_minutes is not None:
+        set_setting("roulette_cd_minutes", cd_minutes)
+        changes.append(f"КД: `{cd_minutes}` минут")
+
+    if min_bet is not None:
+        set_setting("roulette_min_bet", min_bet)
+        changes.append(f"Минимальная ставка: `{min_bet}`")
+
+    if max_bet is not None:
+        set_setting("roulette_max_bet", max_bet)
+        changes.append(f"Максимальная ставка: `{max_bet}`")
+
+    if payout_red_black is not None:
+        set_setting("roulette_payout_red_black", payout_red_black)
+        changes.append(f"Множитель красное/чёрное: `x{payout_red_black}`")
+
+    if payout_green is not None:
+        set_setting("roulette_payout_green", payout_green)
+        changes.append(f"Множитель зелёное (0): `x{payout_green}`")
+
+    if not changes:
+        await interaction.response.send_message(
+            "❗ Ты не указал ни одного параметра для изменения.",
+            ephemeral=True,
+        )
+        return
+
+    embed = discord.Embed(
+        title="✅ Настройки рулетки обновлены",
+        description="\n".join(f"• {c}" for c in changes),
+        color=0x2ECC71,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ===================== НАСТРОЙКИ BLACKJACK ======================
+
+@bot.tree.command(
+    name="blackjack-settings",
+    description="Показать текущие настройки Blackjack.",
+)
+async def blackjack_settings(interaction: discord.Interaction):
+    cd = get_setting("blackjack_cd_minutes")
+    min_bet = get_setting("blackjack_min_bet")
+    max_bet = get_setting("blackjack_max_bet")
+    bj_mult = get_setting("blackjack_blackjack_payout")
+    dealer_soft17 = bool(int(get_setting("blackjack_dealer_hits_soft17")))
+
+    embed = discord.Embed(
+        title="🃏 Настройки Blackjack",
+        color=0x9B59B6,
+    )
+    embed.add_field(name="КД", value=f"`{cd}` минут", inline=False)
+    embed.add_field(
+        name="Диапазон ставки",
+        value=f"от `{int(min_bet)}` до `{int(max_bet)}` Coins",
+        inline=False,
+    )
+    embed.add_field(
+        name="Множитель за Blackjack",
+        value=f"`x{bj_mult}`",
+        inline=True,
+    )
+    embed.add_field(
+        name="Дилер добирает на мягких 17?",
+        value="`Да`" if dealer_soft17 else "`Нет`",
+        inline=True,
+    )
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(
+    name="set-blackjack",
+    description="Изменить настройки Blackjack (только админы).",
+)
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    cd_minutes="КД в минутах (0 = без КД)",
+    min_bet="Минимальная ставка",
+    max_bet="Максимальная ставка",
+    blackjack_payout="Множитель за Blackjack (напр. 1.5)",
+    dealer_hits_soft17="1 = дилер добирает на мягких 17, 0 = стоит на 17",
+)
+async def set_blackjack(
+    interaction: discord.Interaction,
+    cd_minutes: Optional[int] = None,
+    min_bet: Optional[int] = None,
+    max_bet: Optional[int] = None,
+    blackjack_payout: Optional[float] = None,
+    dealer_hits_soft17: Optional[int] = None,
+):
+    changes = []
+
+    if cd_minutes is not None:
+        set_setting("blackjack_cd_minutes", cd_minutes)
+        changes.append(f"КД: `{cd_minutes}` минут")
+
+    if min_bet is not None:
+        set_setting("blackjack_min_bet", min_bet)
+        changes.append(f"Минимальная ставка: `{min_bet}`")
+
+    if max_bet is not None:
+        set_setting("blackjack_max_bet", max_bet)
+        changes.append(f"Максимальная ставка: `{max_bet}`")
+
+    if blackjack_payout is not None:
+        set_setting("blackjack_blackjack_payout", blackjack_payout)
+        changes.append(f"Множитель за Blackjack: `x{blackjack_payout}`")
+
+    if dealer_hits_soft17 is not None:
+        value = 1 if dealer_hits_soft17 != 0 else 0
+        set_setting("blackjack_dealer_hits_soft17", value)
+        changes.append(
+            "Дилер добирает на мягких 17: "
+            + ("`Да`" if value == 1 else "`Нет`")
+        )
+
+    if not changes:
+        await interaction.response.send_message(
+            "❗ Ты не указал ни одного параметра для изменения.",
+            ephemeral=True,
+        )
+        return
+
+    embed = discord.Embed(
+        title="✅ Настройки Blackjack обновлены",
+        description="\n".join(f"• {c}" for c in changes),
+        color=0x2ECC71,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 # ===================== /set-economy =========================
 
 ECON_CHOICES = [
@@ -1056,3 +1248,4 @@ if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("Переменная окружения TOKEN не задана (TOKEN)!")
     bot.run(TOKEN)
+
