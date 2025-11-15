@@ -737,7 +737,7 @@ async def set_collect_role_cmd(
 async def roulette(
     interaction: discord.Interaction,
     amount: int,
-    color: app_commands.Choice[str],
+    color: str,
 ):
     user = get_user(interaction.user.id)
 
@@ -765,7 +765,13 @@ async def roulette(
         )
         return
 
-    bet_color = color.value  # "red" / "black" / "green"
+    bet_color = color.lower()  # "red" / "black" / "green"
+    if bet_color not in ("red", "black", "green"):
+        await interaction.response.send_message(
+            "Цвет должен быть `red`, `black` или `green`.",
+            ephemeral=True,
+        )
+        return
 
     # Крутим рулетку (0–36)
     roll = random.randint(0, 36)
@@ -842,8 +848,6 @@ async def roulette_color_autocomplete(
 
 # ===================== БЛЭКДЖЕК ============================
 
-# Упрощённый одностадийный блэкджек (без кнопок, авто-игра по базовой логике)
-
 def draw_card():
     ranks = ["A"] + [str(i) for i in range(2, 11)] + ["J", "Q", "K"]
     suits = ["♠", "♥", "♦", "♣"]
@@ -851,7 +855,6 @@ def draw_card():
 
 
 def hand_value(cards):
-    # cards: list[(rank, suit)]
     total = 0
     aces = 0
     for rank, _ in cards:
@@ -906,10 +909,8 @@ async def blackjack(interaction: discord.Interaction, amount: int):
     blackjack_payout = get_setting("blackjack_blackjack_payout")
     dealer_hits_soft17 = bool(get_setting("blackjack_dealer_hits_soft17"))
 
-    # Списываем ставку
     coins = user["coins"] - amount
 
-    # Раздача
     player = [draw_card(), draw_card()]
     dealer = [draw_card(), draw_card()]
 
@@ -922,11 +923,9 @@ async def blackjack(interaction: discord.Interaction, amount: int):
     result_text = ""
     win_amount = 0
 
-    # Проверяем блэкджеки
     if player_bj or dealer_bj:
         if player_bj and dealer_bj:
-            # ничья
-            coins += amount  # возврат ставки
+            coins += amount
             result_text = "Оба получили блэкджек. Ничья."
         elif player_bj:
             win_amount = int(amount * blackjack_payout)
@@ -935,14 +934,12 @@ async def blackjack(interaction: discord.Interaction, amount: int):
         else:
             result_text = "У дилера Blackjack. Ты проиграл ставку."
     else:
-        # Авто-логика игрока: тянем пока < 17
         while player_val < 17:
             player.append(draw_card())
             player_val = hand_value(player)
             if player_val > 21:
                 break
 
-        # Если игрок не сгорел, играет дилер
         if player_val <= 21:
             while True:
                 dealer_val = hand_value(dealer)
