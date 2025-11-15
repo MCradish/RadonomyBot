@@ -2,7 +2,7 @@ import os
 import random
 import sqlite3
 import datetime
-from typing import Optional, List
+from typing import Optional
 
 import discord
 from discord import app_commands
@@ -433,7 +433,7 @@ async def crime(interaction: discord.Interaction):
             bonus = "\n🪙 В добыче затесался **1 Radcoin!**"
 
         color = 0x22CC22
-        desc = f"{event_text}\n\nДобыча: **+{amount}💰**.{bonus}"
+        desc = f"{event_text}\n\nДобыча: **+{amount}💰**.{bonus}"""
     else:
         loss_min = int(get_setting("crime_loss_min"))
         loss_max = int(get_setting("crime_loss_max"))
@@ -1232,8 +1232,12 @@ async def background_worker():
 @bot.event
 async def on_ready():
     try:
-        await bot.tree.sync()
-        print(f"Залогинен как {bot.user} и slash-команды синхронизированы.")
+        # ГЛОБАЛЬНАЯ (ПУБЛИЧНАЯ) СИНХРОНИЗАЦИЯ ДЛЯ ВСЕХ СЕРВЕРОВ
+        commands_synced = await bot.tree.sync()
+        print(
+            f"Залогинен как {bot.user} | "
+            f"глобальные slash-команды синхронизированы ({len(commands_synced)} шт.)"
+        )
     except Exception as e:
         print("Ошибка sync:", e)
 
@@ -1248,4 +1252,3 @@ if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("Переменная окружения TOKEN не задана (TOKEN)!")
     bot.run(TOKEN)
-
