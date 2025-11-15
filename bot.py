@@ -2,7 +2,7 @@ import os
 import random
 import sqlite3
 import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 import discord
 from discord import app_commands
@@ -65,6 +65,14 @@ def setup_db():
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
+        )
+    """)
+
+    # Таблица дохода по ролям для /collect-income
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS collect_roles (
+            role_id INTEGER PRIMARY KEY,
+            amount INTEGER NOT NULL
         )
     """)
 
@@ -152,6 +160,29 @@ def set_setting(key: str, value: float):
     c.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
         (key, str(value)),
+    )
+    conn.commit()
+    conn.close()
+
+
+# ===================== ДОХОД ПО РОЛЯМ ДЛЯ COLLECT ====================
+
+def get_collect_roles() -> Dict[int, int]:
+    conn = db()
+    c = conn.cursor()
+    c.execute("SELECT role_id, amount FROM collect_roles")
+    rows = c.fetchall()
+    conn.close()
+    return {row["role_id"]: row["amount"] for row in rows}
+
+
+def set_collect_role_db(role_id: int, amount: int):
+    conn = db()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO collect_roles (role_id, amount) VALUES (?, ?) "
+        "ON CONFLICT(role_id) DO UPDATE SET amount = excluded.amount",
+        (role_id, amount),
     )
     conn.commit()
     conn.close()
@@ -363,6 +394,25 @@ async def cooldown_check(
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return False
     return True
+
+
+# ===================== /balance =============================
+
+@bot.tree.command(
+    name="balance",
+    description="Показать твой баланс Coins и Radcoin.",
+)
+async def balance(interaction: discord.Interaction):
+    user = get_user(interaction.user.id)
+    embed = discord.Embed(
+        title="💳 Баланс",
+        description=(
+            f"**Coins на руках:** `{user['coins']}`\n"
+            f"**Radcoin:** `{user['radcoin']}`"
+        ),
+        color=0xF1C40F,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ===================== /work ================================
@@ -596,15 +646,33 @@ async def collect_income(interaction: discord.Interaction):
     ):
         return
 
-    income = 100  # базовый доход
+    base_income = 100  # базовый доход
+    income = base_income
+    breakdown = [f"Базовый доход: **{base_income}💰**"]
 
-    # Роли вида: income_500, income_200 и т.п.
+    # Роли вида: income_500, income_200 и т.п. (по названию роли)
+    name_bonus = 0
     for role in interaction.user.roles:
         if role.name.startswith("income_"):
             try:
-                income += int(role.name.split("_")[1])
+                add = int(role.name.split("_")[1])
+                name_bonus += add
             except ValueError:
                 pass
+    if name_bonus:
+        income += name_bonus
+        breakdown.append(f"За роли (по имени): **{name_bonus}💰**")
+
+    # Роли, настроенные через /set-collect-role (по ID ролей в БД)
+    db_roles = get_collect_roles()
+    db_bonus = 0
+    for role in interaction.user.roles:
+        amt = db_roles.get(role.id)
+        if amt:
+            db_bonus += amt
+    if db_bonus:
+        income += db_bonus
+        breakdown.append(f"За роли (через /set-collect-role): **{db_bonus}💰**")
 
     coins = user["coins"] + income
     update_field(interaction.user.id, "coins", coins)
@@ -612,12 +680,48 @@ async def collect_income(interaction: discord.Interaction):
         interaction.user.id, "last_income", datetime.datetime.utcnow().isoformat()
     )
 
+    breakdown.append(f"**Итого:** **{income}💰**")
+
     embed = discord.Embed(
         title="💰 Пассивный доход",
-        description=f"Ты собрал ежедневный доход: **+{income}💰**.",
+        description="\n".join(breakdown),
         color=0x33CC33,
     )
     await interaction.response.send_message(embed=embed)
+
+
+# ===================== НАСТРОЙКА ДОХОДА ПО РОЛЯМ ============
+
+@bot.tree.command(
+    name="set-collect-role",
+    description="Настроить доход /collect-income для роли (только админы).",
+)
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    role="Роль, которой добавить доход",
+    amount="Сколько Coins будет давать роль при /collect-income",
+)
+async def set_collect_role_cmd(
+    interaction: discord.Interaction,
+    role: discord.Role,
+    amount: int,
+):
+    if amount < 0:
+        await interaction.response.send_message(
+            "Сумма не может быть отрицательной.", ephemeral=True
+        )
+        return
+
+    set_collect_role_db(role.id, amount)
+    embed = discord.Embed(
+        title="✅ Настройка пассивного дохода",
+        description=(
+            f"Роль {role.mention} теперь даёт **{amount}💰** "
+            f"при использовании `/collect-income`."
+        ),
+        color=0x2ECC71,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ===================== РУЛЕТКА ==============================
@@ -904,8 +1008,7 @@ async def blackjack(interaction: discord.Interaction, amount: int):
 
 # ===================== ТОПЫ ================================
 
-@bot.tree.command(name="top-coins", description="Топ игроков по обычным монетам.")
-async def top_coins(interaction: discord.Interaction):
+async def _send_top_coins(interaction: discord.Interaction):
     conn = db()
     c = conn.cursor()
     c.execute("SELECT user_id, coins FROM users ORDER BY coins DESC LIMIT 10")
@@ -930,6 +1033,16 @@ async def top_coins(interaction: discord.Interaction):
         title="🏆 Топ по Coins", description=text, color=0xFFFF00
     )
     await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="top-coins", description="Топ игроков по обычным монетам.")
+async def top_coins(interaction: discord.Interaction):
+    await _send_top_coins(interaction)
+
+
+@bot.tree.command(name="top-cash", description="Топ игроков по наличным (алиас топа по Coins).")
+async def top_cash(interaction: discord.Interaction):
+    await _send_top_coins(interaction)
 
 
 @bot.tree.command(name="top-radcoin", description="Топ игроков по Radcoin.")
@@ -1051,7 +1164,7 @@ async def background_worker():
 
     now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[BACKGROUND] Бот жив, время (UTC): {now}")
-    # Сюда можно потом добавить авто-события экономики / новости / ивенты
+    # Здесь можно потом добавить авто-ивенты/новости/экономику
 
 
 # ===================== ON_READY =============================
