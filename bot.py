@@ -58,7 +58,6 @@ def setup_db():
     ]
     for col in needed:
         if col not in cols:
-            # для временных полей нам достаточно TEXT
             c.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
 
     # Таблица настроек экономики
@@ -623,9 +622,6 @@ async def collect_income(interaction: discord.Interaction):
 
 # ===================== РУЛЕТКА ==============================
 
-ROULETTE_COLORS = ("red", "black", "green")
-
-
 @bot.tree.command(
     name="roulette",
     description="Рулетка: поставь на красное, чёрное или зелёное.",
@@ -637,18 +633,9 @@ ROULETTE_COLORS = ("red", "black", "green")
 async def roulette(
     interaction: discord.Interaction,
     amount: int,
-    color: str,  # обычная строка, а не Choice
+    color: str,
 ):
     user = get_user(interaction.user.id)
-
-    # нормализуем цвет
-    bet_color = color.lower()
-    if bet_color not in ROULETTE_COLORS:
-        await interaction.response.send_message(
-            "Цвет должен быть: `red`, `black` или `green`.",
-            ephemeral=True,
-        )
-        return
 
     # КД
     cd_minutes = get_setting("roulette_cd_minutes")
@@ -671,6 +658,14 @@ async def roulette(
     if amount > user["coins"]:
         await interaction.response.send_message(
             "У тебя нет столько Coins для ставки.", ephemeral=True
+        )
+        return
+
+    bet_color = color.lower().strip()
+    if bet_color not in ("red", "black", "green"):
+        await interaction.response.send_message(
+            "Нужно указать цвет: `red`, `black` или `green`.",
+            ephemeral=True,
         )
         return
 
@@ -728,23 +723,6 @@ async def roulette(
         title="🎰 Рулетка", description=desc, color=embed_color
     )
     await interaction.response.send_message(embed=embed)
-
-
-@roulette.autocomplete("color")
-async def roulette_color_autocomplete(
-    interaction: discord.Interaction, current: str
-):
-    current = current.lower()
-    options = [
-        ("red", "red — красное"),
-        ("black", "black — чёрное"),
-        ("green", "green — зелёное (0)"),
-    ]
-    result: List[app_commands.Choice[str]] = []
-    for value, label in options:
-        if current in value or current in label.lower():
-            result.append(app_commands.Choice(name=label, value=value))
-    return result[:25]
 
 
 # ===================== БЛЭКДЖЕК ============================
@@ -829,7 +807,7 @@ async def blackjack(interaction: discord.Interaction, amount: int):
     # Проверяем блэкджеки
     if player_bj or dealer_bj:
         if player_bj and dealer_bj:
-            coins += amount  # ничья, возврат ставки
+            coins += amount  # ничья
             result_text = "Оба получили блэкджек. Ничья."
         elif player_bj:
             win_amount = int(amount * blackjack_payout)
@@ -849,7 +827,9 @@ async def blackjack(interaction: discord.Interaction, amount: int):
         if player_val <= 21:
             while True:
                 dealer_val = hand_value(dealer)
-                soft17 = dealer_val == 17 and any(r == "A" for r, _ in dealer)
+                soft17 = dealer_val == 17 and any(
+                    r == "A" for r, _ in dealer
+                )
                 if dealer_val < 17 or (soft17 and dealer_hits_soft17):
                     dealer.append(draw_card())
                     continue
@@ -1017,20 +997,21 @@ ECON_CHOICES = [
 )
 @app_commands.checks.has_permissions(administrator=True)
 @app_commands.describe(
-    parameter="Какой параметр меняем",
+    parameter="Какой параметр меняем (например work_min)",
     value="Новое значение (число, можно с точкой)",
 )
 async def set_economy(
     interaction: discord.Interaction,
-    parameter: str,  # строка вместо Choice
+    parameter: str,
     value: float,
 ):
     key = parameter
-    if key not in DEFAULT_SETTINGS:
-        await interaction.response.send_message(
-            "Неизвестный параметр. Воспользуйся автодополнением.",
-            ephemeral=True,
-        )
+    allowed_keys = [k for k, _ in ECON_CHOICES]
+    if key not in allowed_keys:
+        text = "Неизвестный параметр.\nДоступные примеры:\n"
+        for k, desc in ECON_CHOICES[:10]:
+            text += f"• **{k}** — {desc}\n"
+        await interaction.response.send_message(text, ephemeral=True)
         return
 
     set_setting(key, value)
@@ -1042,18 +1023,6 @@ async def set_economy(
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@set_economy.autocomplete("parameter")
-async def econ_autocomplete(
-    interaction: discord.Interaction, current: str
-):
-    current_lower = current.lower()
-    choices: List[app_commands.Choice[str]] = []
-    for key, desc in ECON_CHOICES:
-        if current_lower in key.lower() or current_lower in desc.lower():
-            choices.append(app_commands.Choice(name=desc, value=key))
-    return choices[:25]
-
-
 # ===================== ФОНОВЫЙ ПРОЦЕСС =====================
 
 @tasks.loop(minutes=5)
@@ -1063,6 +1032,7 @@ async def background_worker():
 
     now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[BACKGROUND] Бот жив, время (UTC): {now}")
+    # сюда можно потом навесить события/ивенты
 
 
 # ===================== ON_READY =============================
