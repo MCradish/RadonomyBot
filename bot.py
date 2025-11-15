@@ -723,6 +723,16 @@ def format_cd(sec: int) -> str:
     return f"{s}с"
 
 
+def build_cd_message(prefix_text: str, left: int) -> str:
+    """Строим текст с оставшимся временем и Discord-таймкодом."""
+    now = dt.datetime.utcnow()
+    ready_ts = int((now + dt.timedelta(seconds=left)).timestamp())
+    return (
+        f"{prefix_text} **{format_cd(left)}**.\n"
+        f"Команда будет доступна: <t:{ready_ts}:R>"
+    )
+
+
 @bot.tree.command(name="work", description="Поработать и заработать Coins (шанс премии в Radcoin)")
 async def slash_work(inter: discord.Interaction):
     if inter.guild is None:
@@ -732,7 +742,8 @@ async def slash_work(inter: discord.Interaction):
     ok, left = check_cooldown(gid, uid, "work", WORK_CD)
     if not ok:
         await inter.response.send_message(
-            f"⏳ Ты уже работал, подожди ещё **{format_cd(left)}**.", ephemeral=True
+            "⏳ Ты уже работал, подожди ещё " + build_cd_message("", left),
+            ephemeral=True,
         )
         return
     reward = random.randint(30, 120)
@@ -766,7 +777,8 @@ async def slash_crime(inter: discord.Interaction):
     ok, left = check_cooldown(gid, uid, "crime", CRIME_CD)
     if not ok:
         await inter.response.send_message(
-            f"⏳ Команда /crime ещё на кд: **{format_cd(left)}**.", ephemeral=True
+            build_cd_message("⏳ Команда /crime ещё на кд:", left),
+            ephemeral=True,
         )
         return
     bal = get_coins_balance(gid, uid)
@@ -811,7 +823,8 @@ async def slash_slut(inter: discord.Interaction):
     ok, left = check_cooldown(gid, uid, "slut", SLUT_CD)
     if not ok:
         await inter.response.send_message(
-            f"⏳ Команда /slut ещё на кд: **{format_cd(left)}**.", ephemeral=True
+            build_cd_message("⏳ Команда /slut ещё на кд:", left),
+            ephemeral=True,
         )
         return
     bal = get_coins_balance(gid, uid)
@@ -861,7 +874,8 @@ async def slash_rob(inter: discord.Interaction, target: discord.Member):
     ok, left = check_cooldown(gid, uid, "rob", ROB_CD)
     if not ok:
         await inter.response.send_message(
-            f"⏳ /rob ещё на кд: **{format_cd(left)}**.", ephemeral=True
+            build_cd_message("⏳ /rob ещё на кд:", left),
+            ephemeral=True,
         )
         return
 
@@ -911,7 +925,7 @@ async def slash_collect_income(inter: discord.Interaction):
     ok, left = check_cooldown(gid, uid, "collect_income", INCOME_CD)
     if not ok:
         await inter.response.send_message(
-            f"⏳ Ты уже собирал доход, подожди ещё **{format_cd(left)}**.",
+            build_cd_message("⏳ Ты уже собирал доход, подожди ещё", left),
             ephemeral=True,
         )
         return
@@ -979,7 +993,7 @@ async def slash_convert(inter: discord.Interaction, amount: float):
     ok, left = check_cooldown(gid, uid, "convert", CONVERT_CD)
     if not ok:
         await inter.response.send_message(
-            f"⏳ Обмен можно делать раз в час. Осталось: **{format_cd(left)}**.",
+            build_cd_message("⏳ Обмен можно делать раз в час. Осталось", left),
             ephemeral=True,
         )
         return
@@ -1039,7 +1053,7 @@ async def slash_convert_radcoin(inter: discord.Interaction, amount: float):
     ok, left = check_cooldown(gid, uid, "convert", CONVERT_CD)
     if not ok:
         await inter.response.send_message(
-            f"⏳ Обмен можно делать раз в час. Осталось: **{format_cd(left)}**.",
+            build_cd_message("⏳ Обмен можно делать раз в час. Осталось", left),
             ephemeral=True,
         )
         return
