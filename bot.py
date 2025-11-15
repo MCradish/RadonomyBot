@@ -1,8 +1,5 @@
 # ============================================
-#  RadonomyBot – базовая версия
-#  - SQLite
-#  - настраиваемый префикс (по умолчанию "/")
-#  - команды: price, balance, buy, sell, radhelp, radsettings
+#  RadonomyBot – slash + prefix версии
 # ============================================
 
 import os
@@ -13,11 +10,12 @@ from typing import Optional, List
 
 import discord
 from discord.ext import commands, tasks
+from discord import app_commands
 
 # ================== CONFIG ===================
 
 DB_PATH = "radonomy.sqlite3"
-DEFAULT_PREFIX = "/"          # стартовый префикс
+DEFAULT_PREFIX = "/"          # стартовый текстовый префикс
 DEFAULT_PRICE = 100.0         # базовый курс Radcoin
 
 # ================== БАЗА ДАННЫХ ==============
@@ -32,7 +30,6 @@ def init_db():
     conn = get_db()
     cur = conn.cursor()
 
-    # настройки сервера
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS guild_settings (
@@ -47,7 +44,6 @@ def init_db():
         """
     )
 
-    # балансы игроков
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS balances (
@@ -59,7 +55,6 @@ def init_db():
         """
     )
 
-    # история цен для графика/аналитики
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS price_history (
@@ -95,9 +90,7 @@ def get_prefix_for_guild(guild_id: Optional[int]) -> str:
 
     conn = get_db()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT prefix FROM guild_settings WHERE guild_id = ?", (guild_id,)
-    )
+    cur.execute("SELECT prefix FROM guild_settings WHERE guild_id = ?", (guild_id,))
     row = cur.fetchone()
     conn.close()
     if row is None:
@@ -135,7 +128,6 @@ def set_price(guild_id: int, new_price: float):
         "UPDATE guild_settings SET price = ? WHERE guild_id = ?",
         (new_price, guild_id),
     )
-    # вносим в историю
     cur.execute(
         "INSERT INTO price_history (guild_id, ts_utc, price) VALUES (?, ?, ?)",
         (guild_id, dt.datetime.utcnow().isoformat(), new_price),
@@ -146,7 +138,7 @@ def set_price(guild_id: int, new_price: float):
 
 def change_price(guild_id: int, delta: float) -> float:
     price = get_price(guild_id)
-    new_price = max(1.0, price + delta)  # не даём уйти в 0 или минус
+    new_price = max(1.0, price + delta)
     set_price(guild_id, new_price)
     return new_price
 
@@ -202,7 +194,6 @@ RANDOM_EVENTS = [
 
 
 def apply_random_event(guild_id: int) -> str:
-    # выбираем случайное событие и случайный % из его диапазона
     text, p_min, p_max = random.choice(RANDOM_EVENTS)
     percent = random.uniform(p_min, p_max)
     price = get_price(guild_id)
@@ -220,9 +211,6 @@ intents.members = True
 
 
 async def prefix_callable(bot: commands.Bot, message: discord.Message):
-    # возвращаем несколько вариантов префикса:
-    # - текущий из базы
-    # - обращение по упоминанию бота
     guild_id = message.guild.id if message.guild else None
     prefix = get_prefix_for_guild(guild_id)
     prefixes: List[str] = [prefix]
@@ -232,12 +220,27 @@ async def prefix_callable(bot: commands.Bot, message: discord.Message):
     return prefixes
 
 
-bot = commands.Bot(command_prefix=prefix_callable, intents=intents)
+class RadonomyBot(commands.Bot):
+    async def setup_hook(self):
+        # slash-команды будут синкаться тут
+        await self.tree.sync()
+        print("Slash-команды синхронизированы.")
+
+
+bot = RadonomyBot(command_prefix=prefix_callable, intents=intents)
 
 
 # ============= ВСПОМОГАТЕЛЬНЫЕ ШТУКИ ==========
 
-def in_guild_only():
+def is_guild_admin(interaction: discord.Interaction) -> bool:
+    return (
+        interaction.guild is not None
+        and isinstance(interaction.user, discord.Member)
+        and interaction.user.guild_permissions.administrator
+    )
+
+
+def in_guild_only_prefix():
     async def predicate(ctx: commands.Context):
         if ctx.guild is None:
             await ctx.send("Эта команда работает только на сервере, а не в ЛС.")
@@ -246,7 +249,7 @@ def in_guild_only():
     return commands.check(predicate)
 
 
-def admin_only():
+def admin_only_prefix():
     async def predicate(ctx: commands.Context):
         if ctx.guild is None:
             return False
@@ -272,12 +275,11 @@ async def on_guild_join(guild: discord.Guild):
     ensure_guild_row(guild.id)
 
 
-# ============== КОМАНДЫ ЭКОНОМИКИ =============
+# ============== ПРЕФИКС-КОМАНДЫ ===============
 
 @bot.command(name="price")
-@in_guild_only()
+@in_guild_only_prefix()
 async def cmd_price(ctx: commands.Context):
-    """Показать текущий курс Radcoin."""
     price = get_price(ctx.guild.id)
     prefix = get_prefix_for_guild(ctx.guild.id)
     embed = discord.Embed(
@@ -290,22 +292,16 @@ async def cmd_price(ctx: commands.Context):
 
 
 @bot.command(name="balance")
-@in_guild_only()
+@in_guild_only_prefix()
 async def cmd_balance(ctx: commands.Context, member: Optional[discord.Member] = None):
-    """Показать баланс Radcoin."""
     member = member or ctx.author
     bal = get_balance(ctx.guild.id, member.id)
     await ctx.send(f"💰 Баланс {member.mention}: **{bal:.2f} RC**")
 
 
 @bot.command(name="buy")
-@in_guild_only()
+@in_guild_only_prefix()
 async def cmd_buy(ctx: commands.Context, amount: float):
-    """
-    Купить Radcoin по текущему курсу.
-    Для простоты считаем, что у игрока всегда хватает внешних денег,
-    а мы просто выдаём Radcoin и двигаем курс.
-    """
     if amount <= 0:
         await ctx.send("Сумма должна быть больше нуля.")
         return
@@ -318,8 +314,7 @@ async def cmd_buy(ctx: commands.Context, amount: float):
     new_bal = bal + amount
     set_balance(guild_id, user_id, new_bal)
 
-    # немного двигаем курс вверх (спрос)
-    delta = price * 0.01 * (amount / 100)  # мягкое изменение
+    delta = price * 0.01 * (amount / 100)
     new_price = change_price(guild_id, delta)
 
     await ctx.send(
@@ -330,9 +325,8 @@ async def cmd_buy(ctx: commands.Context, amount: float):
 
 
 @bot.command(name="sell")
-@in_guild_only()
+@in_guild_only_prefix()
 async def cmd_sell(ctx: commands.Context, amount: float):
-    """Продать Radcoin по текущему курсу."""
     if amount <= 0:
         await ctx.send("Сумма должна быть больше нуля.")
         return
@@ -349,7 +343,6 @@ async def cmd_sell(ctx: commands.Context, amount: float):
     new_bal = bal - amount
     set_balance(guild_id, user_id, new_bal)
 
-    # двигаем курс вниз (предложение)
     delta = -price * 0.01 * (amount / 100)
     new_price = change_price(guild_id, delta)
 
@@ -360,127 +353,308 @@ async def cmd_sell(ctx: commands.Context, amount: float):
     )
 
 
-# ================ RADHELP =====================
-
 @bot.command(name="radhelp")
-@in_guild_only()
+@in_guild_only_prefix()
 async def cmd_radhelp(ctx: commands.Context):
-    """Показать список основных команд бота."""
     prefix = get_prefix_for_guild(ctx.guild.id)
     embed = discord.Embed(
         title="📘 Radonomy / Radcoin — помощь",
         description=f"Текущий префикс: `{prefix}`",
         colour=discord.Colour.blurple(),
     )
-
     embed.add_field(
-        name="Основные команды",
+        name="Основные команды (префикс)",
         value=(
-            f"`{prefix}price` — показать курс Radcoin\n"
-            f"`{prefix}balance [@user]` — показать баланс\n"
-            f"`{prefix}buy <кол-во>` — купить Radcoin\n"
-            f"`{prefix}sell <кол-во>` — продать Radcoin\n"
+            f"`{prefix}price` — показать курс\n"
+            f"`{prefix}balance` — баланс\n"
+            f"`{prefix}buy <кол-во>` — купить\n"
+            f"`{prefix}sell <кол-во>` — продать\n"
         ),
         inline=False,
     )
-
     embed.add_field(
-        name="Админ-команды",
+        name="Slash-команды",
         value=(
-            f"`{prefix}radsettings prefix <символ>` — изменить префикс\n"
-            f"`{prefix}radsettings price <число>` — вручную задать курс\n"
-            f"`{prefix}radsettings events on/off` — включить/выключить рандомные события\n"
-            f"`{prefix}radsettings interval <минуты>` — период случайных событий\n"
+            "`/price`, `/balance`, `/buy`, `/sell`, `/radhelp`, `/radsettings ...`\n"
+            "Они появляются в меню слэш-команд Discord."
         ),
         inline=False,
     )
-
     await ctx.send(embed=embed)
 
 
-# ================ RADSETTINGS =================
+# ============== SLASH-КОМАНДЫ =================
 
-@bot.group(name="radsettings", invoke_without_command=True)
-@admin_only()
-@in_guild_only()
-async def radsettings(ctx: commands.Context):
-    """Группа команд настройки бота на сервере."""
-    prefix = get_prefix_for_guild(ctx.guild.id)
-    await ctx.send(
-        f"⚙ Настройки бота. Используй `{prefix}radsettings prefix ...`, "
-        f"`{prefix}radsettings price ...`, `{prefix}radsettings events ...` и т.п.\n"
-        f"Подробно: `{prefix}radhelp`"
+# /price
+@bot.tree.command(name="price", description="Показать текущий курс Radcoin")
+async def slash_price(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Эта команда работает только на сервере.", ephemeral=True
+        )
+        return
+    price = get_price(interaction.guild.id)
+    embed = discord.Embed(
+        title="📊 Курс Radcoin",
+        description=f"Текущий курс: **{price:.2f} RC**",
+        colour=discord.Colour.gold(),
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=False)
+
+
+# /balance
+@bot.tree.command(name="balance", description="Показать баланс Radcoin")
+@app_commands.describe(member="Чей баланс показать (если не указать – ваш)")
+async def slash_balance(interaction: discord.Interaction, member: Optional[discord.Member] = None):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Эта команда работает только на сервере.", ephemeral=True
+        )
+        return
+    member = member or interaction.user
+    bal = get_balance(interaction.guild.id, member.id)
+    await interaction.response.send_message(
+        f"💰 Баланс {member.mention}: **{bal:.2f} RC**",
+        ephemeral=(member.id == interaction.user.id),
     )
 
 
-@radsettings.command(name="prefix")
-@admin_only()
-@in_guild_only()
-async def radsettings_prefix(ctx: commands.Context, new_prefix: str):
-    """Изменить текстовый префикс бота на сервере."""
-    if len(new_prefix) > 5:
-        await ctx.send("Префикс слишком длинный (максимум 5 символов).")
+# /buy
+@bot.tree.command(name="buy", description="Купить Radcoin по текущему курсу")
+@app_commands.describe(amount="Количество Radcoin для покупки")
+async def slash_buy(interaction: discord.Interaction, amount: float):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Эта команда работает только на сервере.", ephemeral=True
+        )
         return
-    set_prefix_for_guild(ctx.guild.id, new_prefix)
-    await ctx.send(f"✅ Префикс изменён на `{new_prefix}`. Теперь команды: `{new_prefix}price` и т.д.")
-
-
-@radsettings.command(name="price")
-@admin_only()
-@in_guild_only()
-async def radsettings_price(ctx: commands.Context, new_price: float):
-    """Жёстко установить курс Radcoin."""
-    if new_price <= 0:
-        await ctx.send("Курс должен быть больше нуля.")
+    if amount <= 0:
+        await interaction.response.send_message(
+            "Сумма должна быть больше нуля.", ephemeral=True
+        )
         return
-    set_price(ctx.guild.id, new_price)
-    await ctx.send(f"⚠ Курс принудительно установлен на **{new_price:.2f} RC**. Экономика может пострадать!")
 
+    guild_id = interaction.guild.id
+    user_id = interaction.user.id
 
-@radsettings.command(name="events")
-@admin_only()
-@in_guild_only()
-async def radsettings_events(ctx: commands.Context, mode: str):
-    """Включить или выключить случайные событийные изменения курса."""
-    mode = mode.lower()
-    if mode not in ("on", "off"):
-        await ctx.send("Используй: `on` или `off`.")
-        return
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE guild_settings SET random_events = ? WHERE guild_id = ?",
-        (1 if mode == "on" else 0, ctx.guild.id),
+    price = get_price(guild_id)
+    bal = get_balance(guild_id, user_id)
+    new_bal = bal + amount
+    set_balance(guild_id, user_id, new_bal)
+
+    delta = price * 0.01 * (amount / 100)
+    new_price = change_price(guild_id, delta)
+
+    await interaction.response.send_message(
+        f"✅ Ты купил **{amount:.2f} RC**.\n"
+        f"Новый баланс: **{new_bal:.2f} RC**\n"
+        f"Курс слегка вырос до **{new_price:.2f} RC**",
+        ephemeral=True,
     )
-    conn.commit()
-    conn.close()
-    await ctx.send(f"✅ Рандомные события теперь: **{ 'включены' if mode == 'on' else 'выключены' }**.")
 
 
-@radsettings.command(name="interval")
-@admin_only()
-@in_guild_only()
-async def radsettings_interval(ctx: commands.Context, minutes: int):
-    """Изменить период случайных событий (в минутах)."""
-    if minutes < 5:
-        await ctx.send("Минимальный интервал — 5 минут.")
+# /sell
+@bot.tree.command(name="sell", description="Продать Radcoin по текущему курсу")
+@app_commands.describe(amount="Количество Radcoin для продажи")
+async def slash_sell(interaction: discord.Interaction, amount: float):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Эта команда работает только на сервере.", ephemeral=True
+        )
         return
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE guild_settings SET event_interval_min = ? WHERE guild_id = ?",
-        (minutes, ctx.guild.id),
+    if amount <= 0:
+        await interaction.response.send_message(
+            "Сумма должна быть больше нуля.", ephemeral=True
+        )
+        return
+
+    guild_id = interaction.guild.id
+    user_id = interaction.user.id
+
+    bal = get_balance(guild_id, user_id)
+    if amount > bal:
+        await interaction.response.send_message(
+            "У тебя нет столько Radcoin для продажи.", ephemeral=True
+        )
+        return
+
+    price = get_price(guild_id)
+    new_bal = bal - amount
+    set_balance(guild_id, user_id, new_bal)
+
+    delta = -price * 0.01 * (amount / 100)
+    new_price = change_price(guild_id, delta)
+
+    await interaction.response.send_message(
+        f"✅ Ты продал **{amount:.2f} RC**.\n"
+        f"Новый баланс: **{new_bal:.2f} RC**\n"
+        f"Курс немного упал до **{new_price:.2f} RC**",
+        ephemeral=True,
     )
-    conn.commit()
-    conn.close()
-    await ctx.send(f"✅ Интервал случайных событий установлен на **{minutes} минут**.")
 
 
-# ============== ФОНЫЕ СОБЫТИЯ ================
+# /radhelp
+@bot.tree.command(name="radhelp", description="Список команд RadonomyBot")
+async def slash_radhelp(interaction: discord.Interaction):
+    if interaction.guild is None:
+        prefix = DEFAULT_PREFIX
+    else:
+        prefix = get_prefix_for_guild(interaction.guild.id)
+
+    embed = discord.Embed(
+        title="📘 Radonomy / Radcoin — помощь",
+        description="Текущие команды бота.",
+        colour=discord.Colour.blurple(),
+    )
+    embed.add_field(
+        name="Slash-команды",
+        value=(
+            "`/price` — курс Radcoin\n"
+            "`/balance [участник]` — баланс\n"
+            "`/buy <кол-во>` — купить\n"
+            "`/sell <кол-во>` — продать\n"
+            "`/radsettings ...` — настройки\n"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Префикс-команды",
+        value=(
+            f"`{prefix}price`, `{prefix}balance`, `{prefix}buy`, `{prefix}sell`, "
+            f"`{prefix}radhelp`"
+        ),
+        inline=False,
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ============ SLASH ГРУППА /radsettings =======
+
+class RadSettings(app_commands.Group):
+    """Slash-настройки бота на сервере."""
+
+    @app_commands.command(name="prefix", description="Изменить префикс текстовых команд")
+    @app_commands.describe(new_prefix="Новый префикс (до 5 символов)")
+    async def prefix(self, interaction: discord.Interaction, new_prefix: str):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Эта команда работает только на сервере.", ephemeral=True
+            )
+            return
+        if not is_guild_admin(interaction):
+            await interaction.response.send_message(
+                "Нужны права администратора сервера.", ephemeral=True
+            )
+            return
+        if len(new_prefix) > 5:
+            await interaction.response.send_message(
+                "Префикс слишком длинный (максимум 5 символов).",
+                ephemeral=True,
+            )
+            return
+        set_prefix_for_guild(interaction.guild.id, new_prefix)
+        await interaction.response.send_message(
+            f"✅ Префикс изменён на `{new_prefix}`. "
+            f"Теперь команды: `{new_prefix}price`, `{new_prefix}buy` и т.д.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="price", description="Жёстко установить курс Radcoin")
+    @app_commands.describe(new_price="Новый курс (> 0)")
+    async def price(self, interaction: discord.Interaction, new_price: float):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Эта команда работает только на сервере.", ephemeral=True
+            )
+            return
+        if not is_guild_admin(interaction):
+            await interaction.response.send_message(
+                "Нужны права администратора сервера.", ephemeral=True
+            )
+            return
+        if new_price <= 0:
+            await interaction.response.send_message(
+                "Курс должен быть больше нуля.", ephemeral=True
+            )
+            return
+        set_price(interaction.guild.id, new_price)
+        await interaction.response.send_message(
+            f"⚠ Курс принудительно установлен на **{new_price:.2f} RC**. "
+            f"Экономика может пострадать!",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="events", description="Включить или выключить рандомные события")
+    @app_commands.describe(mode="on / off")
+    async def events(self, interaction: discord.Interaction, mode: str):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Эта команда работает только на сервере.", ephemeral=True
+            )
+            return
+        if not is_guild_admin(interaction):
+            await interaction.response.send_message(
+                "Нужны права администратора сервера.", ephemeral=True
+            )
+            return
+        mode = mode.lower()
+        if mode not in ("on", "off"):
+            await interaction.response.send_message(
+                "Используй `on` или `off`.", ephemeral=True
+            )
+            return
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE guild_settings SET random_events = ? WHERE guild_id = ?",
+            (1 if mode == "on" else 0, interaction.guild.id),
+        )
+        conn.commit()
+        conn.close()
+        await interaction.response.send_message(
+            f"✅ Рандомные события теперь: **{'включены' if mode == 'on' else 'выключены'}**.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="interval", description="Изменить период рандомных событий")
+    @app_commands.describe(minutes="Интервал в минутах (минимум 5)")
+    async def interval(self, interaction: discord.Interaction, minutes: int):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Эта команда работает только на сервере.", ephemeral=True
+            )
+            return
+        if not is_guild_admin(interaction):
+            await interaction.response.send_message(
+                "Нужны права администратора сервера.", ephemeral=True
+            )
+            return
+        if minutes < 5:
+            await interaction.response.send_message(
+                "Минимальный интервал — 5 минут.", ephemeral=True
+            )
+            return
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE guild_settings SET event_interval_min = ? WHERE guild_id = ?",
+            (minutes, interaction.guild.id),
+        )
+        conn.commit()
+        conn.close()
+        await interaction.response.send_message(
+            f"✅ Интервал случайных событий установлен на **{minutes} минут**.",
+            ephemeral=True,
+        )
+
+
+bot.tree.add_command(RadSettings(name="radsettings", description="Настройки RadonomyBot"))
+
+
+# ============== ФОНОВЫЕ СОБЫТИЯ ==============
 
 @tasks.loop(minutes=5)
 async def random_events_loop():
-    # Каждые 5 минут пробегаемся по серверам и при необходимости триггерим событие
     now = dt.datetime.utcnow()
     conn = get_db()
     cur = conn.cursor()
@@ -498,12 +672,10 @@ async def random_events_loop():
         if last_ts_raw:
             last_ts = dt.datetime.fromisoformat(last_ts_raw)
             if (now - last_ts).total_seconds() < interval * 60:
-                continue  # ещё рано
+                continue
 
-        # применяем событие
         msg_text = apply_random_event(gid)
 
-        # сохраняем время
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
@@ -513,11 +685,10 @@ async def random_events_loop():
         conn.commit()
         conn.close()
 
-        # пытаемся найти любой текстовый канал на сервере, чтобы отправить инфу
         guild = bot.get_guild(gid)
         if not guild:
             continue
-        # берём первый доступный текстовый канал
+
         channel: Optional[discord.TextChannel] = None
         for ch in guild.text_channels:
             if ch.permissions_for(guild.me).send_messages:
@@ -534,11 +705,10 @@ async def random_events_loop():
 
 def main():
     init_db()
-    TOKEN = os.getenv("TOKEN")
-    if not TOKEN:
+    token = os.getenv("TOKEN")
+    if not token:
         raise RuntimeError("Переменная окружения TOKEN не задана!")
-
-    bot.run(TOKEN)
+    bot.run(token)
 
 
 if __name__ == "__main__":
