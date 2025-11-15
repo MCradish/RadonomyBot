@@ -2,7 +2,7 @@ import os
 import random
 import sqlite3
 import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List
 
 import discord
 from discord import app_commands
@@ -58,6 +58,7 @@ def setup_db():
     ]
     for col in needed:
         if col not in cols:
+            # для временных полей нам достаточно TEXT
             c.execute(f"ALTER TABLE users ADD COLUMN {col} TEXT")
 
     # Таблица настроек экономики
@@ -65,14 +66,6 @@ def setup_db():
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
-        )
-    """)
-
-    # Таблица дохода по ролям для /collect-income
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS collect_roles (
-            role_id INTEGER PRIMARY KEY,
-            amount INTEGER NOT NULL
         )
     """)
 
@@ -160,29 +153,6 @@ def set_setting(key: str, value: float):
     c.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
         (key, str(value)),
-    )
-    conn.commit()
-    conn.close()
-
-
-# ===================== ДОХОД ПО РОЛЯМ ДЛЯ COLLECT ====================
-
-def get_collect_roles() -> Dict[int, int]:
-    conn = db()
-    c = conn.cursor()
-    c.execute("SELECT role_id, amount FROM collect_roles")
-    rows = c.fetchall()
-    conn.close()
-    return {row["role_id"]: row["amount"] for row in rows}
-
-
-def set_collect_role_db(role_id: int, amount: int):
-    conn = db()
-    c = conn.cursor()
-    c.execute(
-        "INSERT INTO collect_roles (role_id, amount) VALUES (?, ?) "
-        "ON CONFLICT(role_id) DO UPDATE SET amount = excluded.amount",
-        (role_id, amount),
     )
     conn.commit()
     conn.close()
@@ -394,25 +364,6 @@ async def cooldown_check(
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return False
     return True
-
-
-# ===================== /balance =============================
-
-@bot.tree.command(
-    name="balance",
-    description="Показать твой баланс Coins и Radcoin.",
-)
-async def balance(interaction: discord.Interaction):
-    user = get_user(interaction.user.id)
-    embed = discord.Embed(
-        title="💳 Баланс",
-        description=(
-            f"**Coins на руках:** `{user['coins']}`\n"
-            f"**Radcoin:** `{user['radcoin']}`"
-        ),
-        color=0xF1C40F,
-    )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ===================== /work ================================
@@ -646,33 +597,15 @@ async def collect_income(interaction: discord.Interaction):
     ):
         return
 
-    base_income = 100  # базовый доход
-    income = base_income
-    breakdown = [f"Базовый доход: **{base_income}💰**"]
+    income = 100  # базовый доход
 
-    # Роли вида: income_500, income_200 и т.п. (по названию роли)
-    name_bonus = 0
+    # Роли вида: income_500, income_200 и т.п.
     for role in interaction.user.roles:
         if role.name.startswith("income_"):
             try:
-                add = int(role.name.split("_")[1])
-                name_bonus += add
+                income += int(role.name.split("_")[1])
             except ValueError:
                 pass
-    if name_bonus:
-        income += name_bonus
-        breakdown.append(f"За роли (по имени): **{name_bonus}💰**")
-
-    # Роли, настроенные через /set-collect-role (по ID ролей в БД)
-    db_roles = get_collect_roles()
-    db_bonus = 0
-    for role in interaction.user.roles:
-        amt = db_roles.get(role.id)
-        if amt:
-            db_bonus += amt
-    if db_bonus:
-        income += db_bonus
-        breakdown.append(f"За роли (через /set-collect-role): **{db_bonus}💰**")
 
     coins = user["coins"] + income
     update_field(interaction.user.id, "coins", coins)
@@ -680,51 +613,18 @@ async def collect_income(interaction: discord.Interaction):
         interaction.user.id, "last_income", datetime.datetime.utcnow().isoformat()
     )
 
-    breakdown.append(f"**Итого:** **{income}💰**")
-
     embed = discord.Embed(
         title="💰 Пассивный доход",
-        description="\n".join(breakdown),
+        description=f"Ты собрал ежедневный доход: **+{income}💰**.",
         color=0x33CC33,
     )
     await interaction.response.send_message(embed=embed)
 
 
-# ===================== НАСТРОЙКА ДОХОДА ПО РОЛЯМ ============
-
-@bot.tree.command(
-    name="set-collect-role",
-    description="Настроить доход /collect-income для роли (только админы).",
-)
-@app_commands.checks.has_permissions(administrator=True)
-@app_commands.describe(
-    role="Роль, которой добавить доход",
-    amount="Сколько Coins будет давать роль при /collect-income",
-)
-async def set_collect_role_cmd(
-    interaction: discord.Interaction,
-    role: discord.Role,
-    amount: int,
-):
-    if amount < 0:
-        await interaction.response.send_message(
-            "Сумма не может быть отрицательной.", ephemeral=True
-        )
-        return
-
-    set_collect_role_db(role.id, amount)
-    embed = discord.Embed(
-        title="✅ Настройка пассивного дохода",
-        description=(
-            f"Роль {role.mention} теперь даёт **{amount}💰** "
-            f"при использовании `/collect-income`."
-        ),
-        color=0x2ECC71,
-    )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
 # ===================== РУЛЕТКА ==============================
+
+ROULETTE_COLORS = ("red", "black", "green")
+
 
 @bot.tree.command(
     name="roulette",
@@ -737,9 +637,18 @@ async def set_collect_role_cmd(
 async def roulette(
     interaction: discord.Interaction,
     amount: int,
-    color: str,
+    color: str,  # обычная строка, а не Choice
 ):
     user = get_user(interaction.user.id)
+
+    # нормализуем цвет
+    bet_color = color.lower()
+    if bet_color not in ROULETTE_COLORS:
+        await interaction.response.send_message(
+            "Цвет должен быть: `red`, `black` или `green`.",
+            ephemeral=True,
+        )
+        return
 
     # КД
     cd_minutes = get_setting("roulette_cd_minutes")
@@ -762,14 +671,6 @@ async def roulette(
     if amount > user["coins"]:
         await interaction.response.send_message(
             "У тебя нет столько Coins для ставки.", ephemeral=True
-        )
-        return
-
-    bet_color = color.lower()  # "red" / "black" / "green"
-    if bet_color not in ("red", "black", "green"):
-        await interaction.response.send_message(
-            "Цвет должен быть `red`, `black` или `green`.",
-            ephemeral=True,
         )
         return
 
@@ -841,7 +742,7 @@ async def roulette_color_autocomplete(
     ]
     result: List[app_commands.Choice[str]] = []
     for value, label in options:
-        if current in value or current in label:
+        if current in value or current in label.lower():
             result.append(app_commands.Choice(name=label, value=value))
     return result[:25]
 
@@ -909,8 +810,10 @@ async def blackjack(interaction: discord.Interaction, amount: int):
     blackjack_payout = get_setting("blackjack_blackjack_payout")
     dealer_hits_soft17 = bool(get_setting("blackjack_dealer_hits_soft17"))
 
+    # Списываем ставку
     coins = user["coins"] - amount
 
+    # Раздача
     player = [draw_card(), draw_card()]
     dealer = [draw_card(), draw_card()]
 
@@ -923,9 +826,10 @@ async def blackjack(interaction: discord.Interaction, amount: int):
     result_text = ""
     win_amount = 0
 
+    # Проверяем блэкджеки
     if player_bj or dealer_bj:
         if player_bj and dealer_bj:
-            coins += amount
+            coins += amount  # ничья, возврат ставки
             result_text = "Оба получили блэкджек. Ничья."
         elif player_bj:
             win_amount = int(amount * blackjack_payout)
@@ -934,18 +838,18 @@ async def blackjack(interaction: discord.Interaction, amount: int):
         else:
             result_text = "У дилера Blackjack. Ты проиграл ставку."
     else:
+        # Авто-логика игрока: тянем пока < 17
         while player_val < 17:
             player.append(draw_card())
             player_val = hand_value(player)
             if player_val > 21:
                 break
 
+        # Если игрок не сгорел, играет дилер
         if player_val <= 21:
             while True:
                 dealer_val = hand_value(dealer)
-                soft17 = dealer_val == 17 and any(
-                    r == "A" for r, _ in dealer
-                )
+                soft17 = dealer_val == 17 and any(r == "A" for r, _ in dealer)
                 if dealer_val < 17 or (soft17 and dealer_hits_soft17):
                     dealer.append(draw_card())
                     continue
@@ -1005,7 +909,8 @@ async def blackjack(interaction: discord.Interaction, amount: int):
 
 # ===================== ТОПЫ ================================
 
-async def _send_top_coins(interaction: discord.Interaction):
+@bot.tree.command(name="top-coins", description="Топ игроков по обычным монетам.")
+async def top_coins(interaction: discord.Interaction):
     conn = db()
     c = conn.cursor()
     c.execute("SELECT user_id, coins FROM users ORDER BY coins DESC LIMIT 10")
@@ -1030,16 +935,6 @@ async def _send_top_coins(interaction: discord.Interaction):
         title="🏆 Топ по Coins", description=text, color=0xFFFF00
     )
     await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="top-coins", description="Топ игроков по обычным монетам.")
-async def top_coins(interaction: discord.Interaction):
-    await _send_top_coins(interaction)
-
-
-@bot.tree.command(name="top-cash", description="Топ игроков по наличным (алиас топа по Coins).")
-async def top_cash(interaction: discord.Interaction):
-    await _send_top_coins(interaction)
 
 
 @bot.tree.command(name="top-radcoin", description="Топ игроков по Radcoin.")
@@ -1127,10 +1022,17 @@ ECON_CHOICES = [
 )
 async def set_economy(
     interaction: discord.Interaction,
-    parameter: app_commands.Choice[str],
+    parameter: str,  # строка вместо Choice
     value: float,
 ):
-    key = parameter.value
+    key = parameter
+    if key not in DEFAULT_SETTINGS:
+        await interaction.response.send_message(
+            "Неизвестный параметр. Воспользуйся автодополнением.",
+            ephemeral=True,
+        )
+        return
+
     set_setting(key, value)
     embed = discord.Embed(
         title="⚙ Настройки экономики обновлены",
@@ -1161,7 +1063,6 @@ async def background_worker():
 
     now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[BACKGROUND] Бот жив, время (UTC): {now}")
-    # Здесь можно потом добавить авто-ивенты/новости/экономику
 
 
 # ===================== ON_READY =============================
