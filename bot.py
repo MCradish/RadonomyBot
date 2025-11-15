@@ -1,5 +1,5 @@
 # ============================================
-#  RadonomyBot – Radcoin + Slash-экономика
+#  RadonomyBot – Radcoin + Coins экономика
 # ============================================
 
 import os
@@ -28,6 +28,7 @@ def init_db():
     conn = get_db()
     cur = conn.cursor()
 
+    # Настройки сервера
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS guild_settings (
@@ -42,17 +43,27 @@ def init_db():
         """
     )
 
+    # Балансы: Radcoin + Coins
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS balances (
             guild_id    INTEGER NOT NULL,
             user_id     INTEGER NOT NULL,
-            wallet      REAL    NOT NULL DEFAULT 0,
+            wallet      REAL    NOT NULL DEFAULT 0,   -- Radcoin
             PRIMARY KEY (guild_id, user_id)
         )
         """
     )
 
+    # Добавляем колонку coins, если её ещё нет
+    cur.execute("PRAGMA table_info(balances)")
+    cols = [row[1] for row in cur.fetchall()]
+    if "coins" not in cols:
+        cur.execute(
+            "ALTER TABLE balances ADD COLUMN coins REAL NOT NULL DEFAULT 0"
+        )
+
+    # История курса
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS price_history (
@@ -64,7 +75,7 @@ def init_db():
         """
     )
 
-    # доходы по ролям для /collect-income
+    # доходы по ролям для /collect-income (Coins)
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS income_roles (
@@ -76,7 +87,7 @@ def init_db():
         """
     )
 
-    # кулдауны для work / rob / crime / slut / collect-income
+    # кулдауны для work / rob / crime / slut / collect-income / convert
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS user_timers (
@@ -161,45 +172,66 @@ def change_price(guild_id: int, delta: float) -> float:
     set_price(guild_id, new_price)
     return new_price
 
+# ---------- BALANCES: Radcoin + Coins ----------
 
-def get_balance(guild_id: int, user_id: int) -> float:
-    """Баланс на руках (cash)."""
-    conn = get_db()
-    cur = conn.cursor()
+def _ensure_balance_row(cur, guild_id: int, user_id: int):
     cur.execute(
-        "SELECT wallet FROM balances WHERE guild_id = ? AND user_id = ?",
+        "SELECT wallet, coins FROM balances WHERE guild_id = ? AND user_id = ?",
         (guild_id, user_id),
     )
     row = cur.fetchone()
     if row is None:
-        wallet = 0.0
         cur.execute(
-            "INSERT INTO balances (guild_id, user_id, wallet) VALUES (?, ?, ?)",
-            (guild_id, user_id, wallet),
+            "INSERT INTO balances (guild_id, user_id, wallet, coins) VALUES (?, ?, ?, ?)",
+            (guild_id, user_id, 0.0, 0.0),
         )
-        conn.commit()
-    else:
-        wallet = float(row["wallet"])
-    conn.close()
-    return wallet
+        return (0.0, 0.0)
+    return (float(row["wallet"]), float(row["coins"]))
 
 
-def set_balance(guild_id: int, user_id: int, amount: float):
+def get_rad_balance(guild_id: int, user_id: int) -> float:
     conn = get_db()
     cur = conn.cursor()
+    rad, _ = _ensure_balance_row(cur, guild_id, user_id)
+    conn.commit()
+    conn.close()
+    return rad
+
+
+def set_rad_balance(guild_id: int, user_id: int, amount: float):
+    conn = get_db()
+    cur = conn.cursor()
+    _ = _ensure_balance_row(cur, guild_id, user_id)
     cur.execute(
-        """
-        INSERT INTO balances (guild_id, user_id, wallet)
-        VALUES (?, ?, ?)
-        ON CONFLICT(guild_id, user_id) DO UPDATE SET wallet = excluded.wallet
-        """,
-        (guild_id, user_id, amount),
+        "UPDATE balances SET wallet = ? WHERE guild_id = ? AND user_id = ?",
+        (amount, guild_id, user_id),
     )
     conn.commit()
     conn.close()
 
 
-# ---------- доходы по ролям ----------
+def get_coins_balance(guild_id: int, user_id: int) -> float:
+    conn = get_db()
+    cur = conn.cursor()
+    _, coins = _ensure_balance_row(cur, guild_id, user_id)
+    conn.commit()
+    conn.close()
+    return coins
+
+
+def set_coins_balance(guild_id: int, user_id: int, amount: float):
+    conn = get_db()
+    cur = conn.cursor()
+    _ = _ensure_balance_row(cur, guild_id, user_id)
+    cur.execute(
+        "UPDATE balances SET coins = ? WHERE guild_id = ? AND user_id = ?",
+        (amount, guild_id, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+# ---------- доходы по ролям (Coins) ----------
 
 def set_income_role(guild_id: int, role_id: int, amount: float):
     conn = get_db()
@@ -390,8 +422,14 @@ async def cmd_price(ctx: commands.Context):
 @in_guild_only_prefix()
 async def cmd_balance_prefix(ctx: commands.Context, member: Optional[discord.Member] = None):
     member = member or ctx.author
-    bal = get_balance(ctx.guild.id, member.id)
-    await ctx.send(f"💰 Баланс {member.mention}: **{bal:.2f} RC**")
+    gid = ctx.guild.id
+    bal_rad = get_rad_balance(gid, member.id)
+    bal_coins = get_coins_balance(gid, member.id)
+    await ctx.send(
+        f"💰 Баланс {member.mention}:\n"
+        f"• Coins: **{bal_coins:.2f}**\n"
+        f"• Radcoin: **{bal_rad:.2f} RC**"
+    )
 
 
 @bot.command(name="buy")
@@ -403,14 +441,14 @@ async def cmd_buy_prefix(ctx: commands.Context, amount: float):
     gid = ctx.guild.id
     uid = ctx.author.id
     price = get_price(gid)
-    bal = get_balance(gid, uid)
+    bal = get_rad_balance(gid, uid)
     new_bal = bal + amount
-    set_balance(gid, uid, new_bal)
+    set_rad_balance(gid, uid, new_bal)
     delta = price * 0.01 * (amount / 100)
     new_price = change_price(gid, delta)
     await ctx.send(
         f"✅ {ctx.author.mention} купил **{amount:.2f} RC**.\n"
-        f"Новый баланс: **{new_bal:.2f} RC**\n"
+        f"Radcoin баланс: **{new_bal:.2f} RC**\n"
         f"Курс вырос до **{new_price:.2f} RC**"
     )
 
@@ -423,18 +461,18 @@ async def cmd_sell_prefix(ctx: commands.Context, amount: float):
         return
     gid = ctx.guild.id
     uid = ctx.author.id
-    bal = get_balance(gid, uid)
+    bal = get_rad_balance(gid, uid)
     if amount > bal:
         await ctx.send("У тебя нет столько Radcoin.")
         return
     price = get_price(gid)
     new_bal = bal - amount
-    set_balance(gid, uid, new_bal)
+    set_rad_balance(gid, uid, new_bal)
     delta = -price * 0.01 * (amount / 100)
     new_price = change_price(gid, delta)
     await ctx.send(
         f"✅ {ctx.author.mention} продал **{amount:.2f} RC**.\n"
-        f"Новый баланс: **{new_bal:.2f} RC**\n"
+        f"Radcoin баланс: **{new_bal:.2f} RC**\n"
         f"Курс упал до **{new_price:.2f} RC**"
     )
 
@@ -444,26 +482,28 @@ async def cmd_sell_prefix(ctx: commands.Context, amount: float):
 async def cmd_radhelp_prefix(ctx: commands.Context):
     prefix = get_prefix_for_guild(ctx.guild.id)
     embed = discord.Embed(
-        title="📘 Radonomy / Radcoin — помощь",
+        title="📘 Radonomy / помощь",
         description=f"Текущий префикс: `{prefix}`",
         colour=discord.Colour.blurple(),
     )
     embed.add_field(
-        name="Префикс-команды",
-        value=(
-            f"`{prefix}price`, `{prefix}balance`, `{prefix}buy`, `{prefix}sell`"
-        ),
+        name="Префикс-команды (Radcoin)",
+        value=f"`{prefix}price`, `{prefix}balance`, `{prefix}buy`, `{prefix}sell`",
         inline=False,
     )
     embed.add_field(
         name="Slash-команды",
-        value="`/price`, `/balance`, `/buy`, `/sell`, `/work`, `/rob`, `/crime`, `/slut`, `/collect-income`, `/top-cash`, `/radsettings ...`",
+        value=(
+            "`/price`, `/balance`, `/buy`, `/sell`, `/work`, `/rob`, `/crime`, `/slut`, "
+            "`/collect-income`, `/convert`, `/convert-radcoin`, `/top-cash`, `/top-radcoin`, "
+            "`/radsettings ...`"
+        ),
         inline=False,
     )
     await ctx.send(embed=embed)
 
 
-# ============== SLASH-КОМАНДЫ Radcoin ==============
+# ============== SLASH-КОМАНДЫ Radcoin/Coins ==============
 
 @bot.tree.command(name="price", description="Показать текущий курс Radcoin")
 async def slash_price(inter: discord.Interaction):
@@ -479,21 +519,25 @@ async def slash_price(inter: discord.Interaction):
     await inter.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="balance", description="Показать баланс Radcoin")
+@bot.tree.command(name="balance", description="Показать баланс Coins и Radcoin")
 @app_commands.describe(member="Чей баланс показать (если не указать – ваш)")
 async def slash_balance(inter: discord.Interaction, member: Optional[discord.Member] = None):
     if inter.guild is None:
         await inter.response.send_message("Только на сервере.", ephemeral=True)
         return
     member = member or inter.user
-    bal = get_balance(inter.guild.id, member.id)
+    gid = inter.guild.id
+    bal_rad = get_rad_balance(gid, member.id)
+    bal_coins = get_coins_balance(gid, member.id)
     await inter.response.send_message(
-        f"💰 Баланс {member.mention}: **{bal:.2f} RC**",
+        f"💰 Баланс {member.mention}:\n"
+        f"• Coins: **{bal_coins:.2f}**\n"
+        f"• Radcoin: **{bal_rad:.2f} RC**",
         ephemeral=(member.id == inter.user.id),
     )
 
 
-@bot.tree.command(name="buy", description="Купить Radcoin")
+@bot.tree.command(name="buy", description="Купить Radcoin (условно за внешние деньги)")
 @app_commands.describe(amount="Количество Radcoin")
 async def slash_buy(inter: discord.Interaction, amount: float):
     if inter.guild is None:
@@ -505,13 +549,13 @@ async def slash_buy(inter: discord.Interaction, amount: float):
     gid = inter.guild.id
     uid = inter.user.id
     price = get_price(gid)
-    bal = get_balance(gid, uid)
+    bal = get_rad_balance(gid, uid)
     new_bal = bal + amount
-    set_balance(gid, uid, new_bal)
+    set_rad_balance(gid, uid, new_bal)
     delta = price * 0.01 * (amount / 100)
     new_price = change_price(gid, delta)
     await inter.response.send_message(
-        f"✅ Куплено **{amount:.2f} RC**.\nБаланс: **{new_bal:.2f} RC**\nКурс: **{new_price:.2f} RC**",
+        f"✅ Куплено **{amount:.2f} RC**.\nRadcoin баланс: **{new_bal:.2f} RC**\nКурс: **{new_price:.2f} RC**",
         ephemeral=True,
     )
 
@@ -527,17 +571,17 @@ async def slash_sell(inter: discord.Interaction, amount: float):
         return
     gid = inter.guild.id
     uid = inter.user.id
-    bal = get_balance(gid, uid)
+    bal = get_rad_balance(gid, uid)
     if amount > bal:
         await inter.response.send_message("У тебя нет столько Radcoin.", ephemeral=True)
         return
     price = get_price(gid)
     new_bal = bal - amount
-    set_balance(gid, uid, new_bal)
+    set_rad_balance(gid, uid, new_bal)
     delta = -price * 0.01 * (amount / 100)
     new_price = change_price(gid, delta)
     await inter.response.send_message(
-        f"✅ Продано **{amount:.2f} RC**.\nБаланс: **{new_bal:.2f} RC**\nКурс: **{new_price:.2f} RC**",
+        f"✅ Продано **{amount:.2f} RC**.\nRadcoin баланс: **{new_bal:.2f} RC**\nКурс: **{new_price:.2f} RC**",
         ephemeral=True,
     )
 
@@ -546,14 +590,15 @@ async def slash_sell(inter: discord.Interaction, amount: float):
 async def slash_radhelp(inter: discord.Interaction):
     prefix = DEFAULT_PREFIX if inter.guild is None else get_prefix_for_guild(inter.guild.id)
     embed = discord.Embed(
-        title="📘 Radonomy / Radcoin — помощь",
+        title="📘 Radonomy / помощь",
         colour=discord.Colour.blurple(),
     )
     embed.add_field(
         name="Slash-команды (экономика)",
         value=(
             "`/price`, `/balance`, `/buy`, `/sell`, `/work`, `/rob`, `/crime`, "
-            "`/slut`, `/collect-income`, `/top-cash`, `/radsettings ...`"
+            "`/slut`, `/collect-income`, `/convert`, `/convert-radcoin`, "
+            "`/top-cash`, `/top-radcoin`, `/radsettings ...`"
         ),
         inline=False,
     )
@@ -658,11 +703,14 @@ bot.tree.add_command(RadSettings(name="radsettings", description="Настрой
 
 # ============ SLASH-ЭКОНОМИКА: work / rob / crime / slut ============
 
-WORK_CD = 60 * 5      # 5 мин
-CRIME_CD = 60 * 7     # 7 мин
-SLUT_CD = 60 * 7      # 7 мин
+WORK_CD = 60 * 60     # 1 час
+CRIME_CD = 60 * 60    # 1 час
+SLUT_CD = 60 * 60     # 1 час
 ROB_CD = 60 * 10      # 10 мин
 INCOME_CD = 60 * 30   # 30 мин для collect-income
+CONVERT_CD = 60 * 60  # 1 час для convert/convert-radcoin
+CONVERT_FEE = 5.0     # 5% комиссия при обменах
+RAD_BONUS_CHANCE = 0.05  # 5% шанс получить 1 Radcoin
 
 
 def format_cd(sec: int) -> str:
@@ -675,7 +723,7 @@ def format_cd(sec: int) -> str:
     return f"{s}с"
 
 
-@bot.tree.command(name="work", description="Пойти поработать и заработать немного RC")
+@bot.tree.command(name="work", description="Поработать и заработать Coins (шанс премии в Radcoin)")
 async def slash_work(inter: discord.Interaction):
     if inter.guild is None:
         await inter.response.send_message("Только на сервере.", ephemeral=True)
@@ -688,16 +736,28 @@ async def slash_work(inter: discord.Interaction):
         )
         return
     reward = random.randint(30, 120)
-    bal = get_balance(gid, uid)
-    set_balance(gid, uid, bal + reward)
+    bal = get_coins_balance(gid, uid)
+    new_coins = bal + reward
+    set_coins_balance(gid, uid, new_coins)
     update_timer(gid, uid, "work")
+
+    bonus_text = ""
+    if random.random() < RAD_BONUS_CHANCE:
+        rad_bal = get_rad_balance(gid, uid)
+        set_rad_balance(gid, uid, rad_bal + 1.0)
+        bonus_text = (
+            "\n🎁 Сегодня на работе вам выдали премию — **1 Radcoin**! "
+            "Руководство довольно твоей работой."
+        )
+
     await inter.response.send_message(
-        f"💼 Ты поработал и получил **{reward} RC**. Теперь у тебя **{bal + reward:.2f} RC**.",
+        f"💼 Ты поработал и получил **{reward} Coins**. Теперь у тебя **{new_coins:.2f} Coins**."
+        f"{bonus_text}",
         ephemeral=True,
     )
 
 
-@bot.tree.command(name="crime", description="Рискованное дело: можно много заработать или потерять")
+@bot.tree.command(name="crime", description="Рискованное дело: можно заработать или потерять Coins")
 async def slash_crime(inter: discord.Interaction):
     if inter.guild is None:
         await inter.response.send_message("Только на сервере.", ephemeral=True)
@@ -709,21 +769,40 @@ async def slash_crime(inter: discord.Interaction):
             f"⏳ Команда /crime ещё на кд: **{format_cd(left)}**.", ephemeral=True
         )
         return
-    bal = get_balance(gid, uid)
+    bal = get_coins_balance(gid, uid)
     success = random.random() < 0.55  # 55% успеха
     if success:
         reward = random.randint(80, 260)
-        set_balance(gid, uid, bal + reward)
-        text = f"🧨 Преступление удалось! Ты сорвал куш **{reward} RC**.\nБаланс: **{bal + reward:.2f} RC**"
+        new_coins = bal + reward
+        set_coins_balance(gid, uid, new_coins)
+
+        bonus_text = ""
+        if random.random() < RAD_BONUS_CHANCE:
+            rad_bal = get_rad_balance(gid, uid)
+            set_rad_balance(gid, uid, rad_bal + 1.0)
+            bonus_text = (
+                "\n🎁 За удачную операцию тёмный покровитель наградил тебя — **1 Radcoin**."
+            )
+
+        text = (
+            f"🧨 Преступление удалось! Ты сорвал куш **{reward} Coins**.\n"
+            f"Баланс: **{new_coins:.2f} Coins**"
+            f"{bonus_text}"
+        )
     else:
         loss = min(bal, random.randint(40, 140))
-        set_balance(gid, uid, bal - loss)
-        text = f"🚔 Тебя поймали! Штраф **{loss} RC**.\nБаланс: **{bal - loss:.2f} RC**"
+        new_coins = bal - loss
+        set_coins_balance(gid, uid, new_coins)
+        text = (
+            f"🚔 Тебя поймали! Штраф **{loss} Coins**.\n"
+            f"Баланс: **{new_coins:.2f} Coins**"
+        )
+
     update_timer(gid, uid, "crime")
     await inter.response.send_message(text, ephemeral=True)
 
 
-@bot.tree.command(name="slut", description="Грязные делишки за RC (высокий риск, средняя награда)")
+@bot.tree.command(name="slut", description="Грязные делишки за Coins (риск, но может быть премия)")
 async def slash_slut(inter: discord.Interaction):
     if inter.guild is None:
         await inter.response.send_message("Только на сервере.", ephemeral=True)
@@ -735,21 +814,40 @@ async def slash_slut(inter: discord.Interaction):
             f"⏳ Команда /slut ещё на кд: **{format_cd(left)}**.", ephemeral=True
         )
         return
-    bal = get_balance(gid, uid)
+    bal = get_coins_balance(gid, uid)
     success = random.random() < 0.6
     if success:
         reward = random.randint(50, 200)
-        set_balance(gid, uid, bal + reward)
-        text = f"💋 Ты очаровал клиента и получил **{reward} RC**.\nБаланс: **{bal + reward:.2f} RC**"
+        new_coins = bal + reward
+        set_coins_balance(gid, uid, new_coins)
+
+        bonus_text = ""
+        if random.random() < RAD_BONUS_CHANCE:
+            rad_bal = get_rad_balance(gid, uid)
+            set_rad_balance(gid, uid, rad_bal + 1.0)
+            bonus_text = (
+                "\n🎁 Клиент оказался щедрым: в конверте лежал ещё **1 Radcoin**."
+            )
+
+        text = (
+            f"💋 Всё прошло как по маслу, ты получил **{reward} Coins**.\n"
+            f"Баланс: **{new_coins:.2f} Coins**"
+            f"{bonus_text}"
+        )
     else:
         loss = min(bal, random.randint(20, 100))
-        set_balance(gid, uid, bal - loss)
-        text = f"💀 Всё пошло не по плану, ты потерял **{loss} RC**.\nБаланс: **{bal - loss:.2f} RC**"
+        new_coins = bal - loss
+        set_coins_balance(gid, uid, new_coins)
+        text = (
+            f"💀 Всё пошло не по плану, ты потерял **{loss} Coins**.\n"
+            f"Баланс: **{new_coins:.2f} Coins**"
+        )
+
     update_timer(gid, uid, "slut")
     await inter.response.send_message(text, ephemeral=True)
 
 
-@bot.tree.command(name="rob", description="Попробовать ограбить другого игрока")
+@bot.tree.command(name="rob", description="Попробовать ограбить другого игрока (Coins)")
 @app_commands.describe(target="Кого ограбить")
 async def slash_rob(inter: discord.Interaction, target: discord.Member):
     if inter.guild is None:
@@ -767,12 +865,12 @@ async def slash_rob(inter: discord.Interaction, target: discord.Member):
         )
         return
 
-    bal_robber = get_balance(gid, uid)
-    bal_target = get_balance(gid, target.id)
+    bal_robber = get_coins_balance(gid, uid)
+    bal_target = get_coins_balance(gid, target.id)
 
     if bal_target < 50:
         await inter.response.send_message(
-            "У цели почти нет денег, грабить нечего.", ephemeral=True
+            "У цели почти нет Coins, грабить нечего.", ephemeral=True
         )
         return
 
@@ -781,27 +879,30 @@ async def slash_rob(inter: discord.Interaction, target: discord.Member):
         stolen = int(bal_target * random.uniform(0.15, 0.35))
         stolen = max(20, stolen)
         stolen = min(stolen, bal_target)
-        set_balance(gid, target.id, bal_target - stolen)
-        set_balance(gid, uid, bal_robber + stolen)
+        new_target = bal_target - stolen
+        new_robber = bal_robber + stolen
+        set_coins_balance(gid, target.id, new_target)
+        set_coins_balance(gid, uid, new_robber)
         text = (
-            f"🔫 Ты успешно ограбил {target.mention} и забрал **{stolen} RC**!\n"
-            f"Твой баланс: **{bal_robber + stolen:.2f} RC**\n"
-            f"Баланс жертвы: **{bal_target - stolen:.2f} RC**"
+            f"🔫 Ты успешно ограбил {target.mention} и забрал **{stolen} Coins**!\n"
+            f"Твой баланс: **{new_robber:.2f} Coins**\n"
+            f"Баланс жертвы: **{new_target:.2f} Coins**"
         )
     else:
         fine = min(bal_robber, int(bal_robber * random.uniform(0.1, 0.3)))
-        set_balance(gid, uid, bal_robber - fine)
+        new_robber = bal_robber - fine
+        set_coins_balance(gid, uid, new_robber)
         text = (
-            f"🚓 Попытка провалилась, тебя задержали. Штраф **{fine} RC**.\n"
-            f"Твой баланс: **{bal_robber - fine:.2f} RC**"
+            f"🚓 Попытка провалилась, тебя задержали. Штраф **{fine} Coins**.\n"
+            f"Твой баланс: **{new_robber:.2f} Coins**"
         )
     update_timer(gid, uid, "rob")
     await inter.response.send_message(text)
 
 
-# ============ /collect-income и /addcollect-income ============
+# ============ /collect-income и /addcollect-income (Coins) ============
 
-@bot.tree.command(name="collect-income", description="Собрать доход по своим ролям")
+@bot.tree.command(name="collect-income", description="Собрать Coins по доходу ролей")
 async def slash_collect_income(inter: discord.Interaction):
     if inter.guild is None:
         await inter.response.send_message("Только на сервере.", ephemeral=True)
@@ -825,17 +926,18 @@ async def slash_collect_income(inter: discord.Interaction):
             ephemeral=True,
         )
         return
-    bal = get_balance(gid, uid)
-    set_balance(gid, uid, bal + income)
+    bal = get_coins_balance(gid, uid)
+    new_coins = bal + income
+    set_coins_balance(gid, uid, new_coins)
     update_timer(gid, uid, "collect_income")
     await inter.response.send_message(
-        f"💸 Ты собрал доход по ролям: **{income} RC**.\nБаланс: **{bal + income:.2f} RC**.",
+        f"💸 Ты собрал доход по ролям: **{income} Coins**.\nБаланс: **{new_coins:.2f} Coins**.",
         ephemeral=True,
     )
 
 
-@bot.tree.command(name="addcollect-income", description="Назначить доход для роли (только админы)")
-@app_commands.describe(role="Роль, которая будет получать доход", amount="Сколько RC при сборе")
+@bot.tree.command(name="addcollect-income", description="Назначить доход Coins для роли (только админы)")
+@app_commands.describe(role="Роль, которая будет получать доход", amount="Сколько Coins при сборе")
 async def slash_addcollect_income(inter: discord.Interaction, role: discord.Role, amount: float):
     if inter.guild is None:
         await inter.response.send_message("Только на сервере.", ephemeral=True)
@@ -848,16 +950,175 @@ async def slash_addcollect_income(inter: discord.Interaction, role: discord.Role
         return
     set_income_role(inter.guild.id, role.id, amount)
     await inter.response.send_message(
-        f"✅ Для роли {role.mention} установлен доход **{amount} RC** за `/collect-income`.",
+        f"✅ Для роли {role.mention} установлен доход **{amount} Coins** за `/collect-income`.",
         ephemeral=True,
     )
 
 
-# ============ /top-cash ============
+# ============ /convert (Coins -> Radcoin) ============
 
-@bot.tree.command(name="top-cash", description="Топ игроков по наличным деньгам")
+@bot.tree.command(name="convert", description="Обменять Coins на Radcoin с комиссией")
+@app_commands.describe(amount="Сколько Coins обменять")
+async def slash_convert(inter: discord.Interaction, amount: float):
+    """
+    Coins -> Radcoin
+    - берем amount Coins
+    - комиссия CONVERT_FEE%
+    - чистая сумма = amount * (1 - fee)
+    - Radcoin = чистая_сумма / price
+    - двигаем курс вверх (как при покупке)
+    """
+    if inter.guild is None:
+        await inter.response.send_message("Только на сервере.", ephemeral=True)
+        return
+    if amount <= 0:
+        await inter.response.send_message("Сумма должна быть > 0.", ephemeral=True)
+        return
+
+    gid, uid = inter.guild.id, inter.user.id
+    ok, left = check_cooldown(gid, uid, "convert", CONVERT_CD)
+    if not ok:
+        await inter.response.send_message(
+            f"⏳ Обмен можно делать раз в час. Осталось: **{format_cd(left)}**.",
+            ephemeral=True,
+        )
+        return
+
+    coins_bal = get_coins_balance(gid, uid)
+    if amount > coins_bal:
+        await inter.response.send_message("У тебя нет столько Coins.", ephemeral=True)
+        return
+
+    price = get_price(gid)
+    fee_coef = 1.0 - (CONVERT_FEE / 100.0)
+    coins_after_fee = amount * fee_coef
+    rad_gain = coins_after_fee / price  # сколько Radcoin получим
+
+    set_coins_balance(gid, uid, coins_bal - amount)
+
+    rad_bal = get_rad_balance(gid, uid)
+    new_rad = rad_bal + rad_gain
+    set_rad_balance(gid, uid, new_rad)
+
+    delta = price * 0.01 * (rad_gain / 100)
+    new_price = change_price(gid, delta)
+
+    update_timer(gid, uid, "convert")
+
+    await inter.response.send_message(
+        f"🔁 Обмен (Coins → Radcoin) успешно завершён!\n"
+        f"Списано: **{amount:.2f} Coins** (комиссия {CONVERT_FEE:.1f}%)\n"
+        f"Получено: **{rad_gain:.4f} RC**\n"
+        f"Баланс: **{new_rad:.4f} RC** и **{coins_bal - amount:.2f} Coins**\n"
+        f"Новый курс Radcoin: **{new_price:.2f} RC**",
+        ephemeral=True,
+    )
+
+
+# ============ /convert-radcoin (Radcoin -> Coins) ============
+
+@bot.tree.command(name="convert-radcoin", description="Обменять Radcoin на Coins с комиссией")
+@app_commands.describe(amount="Сколько Radcoin обменять")
+async def slash_convert_radcoin(inter: discord.Interaction, amount: float):
+    """
+    Radcoin -> Coins
+    - берем amount RC
+    - Coins = amount * price
+    - комиссия CONVERT_FEE%
+    - итоговые Coins = RC * price * (1 - fee)
+    - двигаем курс вниз (как при продаже)
+    """
+    if inter.guild is None:
+        await inter.response.send_message("Только на сервере.", ephemeral=True)
+        return
+    if amount <= 0:
+        await inter.response.send_message("Сумма должна быть > 0.", ephemeral=True)
+        return
+
+    gid, uid = inter.guild.id, inter.user.id
+    ok, left = check_cooldown(gid, uid, "convert", CONVERT_CD)
+    if not ok:
+        await inter.response.send_message(
+            f"⏳ Обмен можно делать раз в час. Осталось: **{format_cd(left)}**.",
+            ephemeral=True,
+        )
+        return
+
+    rad_bal = get_rad_balance(gid, uid)
+    if amount > rad_bal:
+        await inter.response.send_message("У тебя нет столько Radcoin.", ephemeral=True)
+        return
+
+    price = get_price(gid)
+    gross_coins = amount * price
+    fee_coef = 1.0 - (CONVERT_FEE / 100.0)
+    coins_gain = gross_coins * fee_coef
+
+    new_rad = rad_bal - amount
+    set_rad_balance(gid, uid, new_rad)
+
+    coins_bal = get_coins_balance(gid, uid)
+    new_coins = coins_bal + coins_gain
+    set_coins_balance(gid, uid, new_coins)
+
+    delta = -price * 0.01 * (amount / 100)
+    new_price = change_price(gid, delta)
+
+    update_timer(gid, uid, "convert")
+
+    await inter.response.send_message(
+        f"🔁 Обмен (Radcoin → Coins) успешно завершён!\n"
+        f"Списано: **{amount:.4f} RC** (комиссия {CONVERT_FEE:.1f}%)\n"
+        f"Получено: **{coins_gain:.2f} Coins**\n"
+        f"Баланс: **{new_rad:.4f} RC** и **{new_coins:.2f} Coins**\n"
+        f"Новый курс Radcoin: **{new_price:.2f} RC**",
+        ephemeral=True,
+    )
+
+
+# ============ /top-cash (по Coins) ============
+
+@bot.tree.command(name="top-cash", description="Топ игроков по наличным Coins")
 @app_commands.describe(limit="Сколько игроков показать (по умолчанию 10)")
 async def slash_top_cash(inter: discord.Interaction, limit: int = 10):
+    if inter.guild is None:
+        await inter.response.send_message("Только на сервере.", ephemeral=True)
+        return
+    limit = max(1, min(limit, 25))
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT user_id, coins FROM balances
+        WHERE guild_id = ? AND coins > 0
+        ORDER BY coins DESC
+        LIMIT ?
+        """,
+        (inter.guild.id, limit),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    if not rows:
+        await inter.response.send_message("Пока ни у кого нет Coins.", ephemeral=True)
+        return
+    lines = []
+    for i, row in enumerate(rows, start=1):
+        user = inter.guild.get_member(row["user_id"])
+        name = user.mention if user else f"`ID {row['user_id']}`"
+        lines.append(f"**{i}.** {name} — **{row['coins']:.2f} Coins**")
+    embed = discord.Embed(
+        title="🏆 Топ по Coins (наличные)",
+        description="\n".join(lines),
+        colour=discord.Colour.gold(),
+    )
+    await inter.response.send_message(embed=embed)
+
+
+# ============ /top-radcoin (по Radcoin) ============
+
+@bot.tree.command(name="top-radcoin", description="Топ игроков по количеству Radcoin")
+@app_commands.describe(limit="Сколько игроков показать (по умолчанию 10)")
+async def slash_top_radcoin(inter: discord.Interaction, limit: int = 10):
     if inter.guild is None:
         await inter.response.send_message("Только на сервере.", ephemeral=True)
         return
@@ -876,17 +1137,17 @@ async def slash_top_cash(inter: discord.Interaction, limit: int = 10):
     rows = cur.fetchall()
     conn.close()
     if not rows:
-        await inter.response.send_message("Пока ни у кого нет денег.", ephemeral=True)
+        await inter.response.send_message("Пока ни у кого нет Radcoin.", ephemeral=True)
         return
     lines = []
     for i, row in enumerate(rows, start=1):
         user = inter.guild.get_member(row["user_id"])
         name = user.mention if user else f"`ID {row['user_id']}`"
-        lines.append(f"**{i}.** {name} — **{row['wallet']:.2f} RC**")
+        lines.append(f"**{i}.** {name} — **{row['wallet']:.4f} RC**")
     embed = discord.Embed(
-        title="🏆 Топ по наличным (cash)",
+        title="🏆 Топ по Radcoin",
         description="\n".join(lines),
-        colour=discord.Colour.gold(),
+        colour=discord.Colour.purple(),
     )
     await inter.response.send_message(embed=embed)
 
